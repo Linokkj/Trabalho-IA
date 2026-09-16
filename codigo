@@ -22,6 +22,32 @@ if (file_exists(__DIR__ . '/.env')) {
     }
 }
 
+// --- FUNÇÃO DE REQUISIÇÃO HUGGING FACE ---
+function chamarHuggingFace(string $url, array $payload, string $token): array {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_IPRESOLVE      => CURL_IPRESOLVE_V4,
+        CURLOPT_HTTPHEADER     => [
+            "Authorization: Bearer " . trim($token),
+            "Content-Type: application/json",
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        ]
+    ]);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return ['code' => $httpCode, 'response' => $response];
+}
+
 $geniusToken = getenv('GENIUS_TOKEN') ?: ($_ENV['GENIUS_TOKEN'] ?? '');
 $hfToken     = getenv('HF_TOKEN')     ?: ($_ENV['HF_TOKEN'] ?? '');
 
@@ -30,107 +56,90 @@ $musicaEncontrada  = null;
 $traducaoResultado = null;
 $erroMsg           = null;
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
-    $trechoDigitado = trim($_POST['trecho']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $trechoRaw = filter_input(INPUT_POST, 'trecho', FILTER_DEFAULT);
+    $trechoDigitado = $trechoRaw ? trim($trechoRaw) : '';
 
-    if (empty($geniusToken)) {
-        $erroMsg = "Token do Genius não configurado no .env.";
-    } else {
-        // --- 1. BUSCA MÚSICA NO GENIUS ---
-        $geniusUrl = "https://api.genius.com/search?q=" . urlencode($trechoDigitado);
-        $chGenius = curl_init($geniusUrl);
-        curl_setopt($chGenius, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($chGenius, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($chGenius, CURLOPT_SSL_VERIFYHOST, false);
-        curl_setopt($chGenius, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-        curl_setopt($chGenius, CURLOPT_TIMEOUT, 30);
-        curl_setopt($chGenius, CURLOPT_HTTPHEADER, [
-            "Authorization: Bearer " . trim($geniusToken),
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        ]);
+    if (!empty($trechoDigitado)) {
+        if (empty($geniusToken)) {
+            $erroMsg = "Token do Genius não configurado no arquivo .env.";
+        } else {
+            // --- 1. BUSCA MÚSICA NO GENIUS ---
+            $geniusUrl = "https://api.genius.com/search?q=" . urlencode($trechoDigitado);
+            $chGenius = curl_init($geniusUrl);
+            curl_setopt_array($chGenius, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+                CURLOPT_IPRESOLVE      => CURL_IPRESOLVE_V4,
+                CURLOPT_TIMEOUT        => 30,
+                CURLOPT_HTTPHEADER     => [
+                    "Authorization: Bearer " . trim($geniusToken),
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                ]
+            ]);
 
-        $responseGenius = curl_exec($chGenius);
-        $httpCodeGenius = curl_getinfo($chGenius, CURLINFO_HTTP_CODE);
-        curl_close($chGenius);
+            $responseGenius = curl_exec($chGenius);
+            $httpCodeGenius = curl_getinfo($chGenius, CURLINFO_HTTP_CODE);
+            curl_close($chGenius);
 
-        if ($httpCodeGenius === 200) {
-            $dadosGenius = json_decode($responseGenius, true);
-            $hits = $dadosGenius['response']['hits'] ?? [];
+            if ($httpCodeGenius === 200) {
+                $dadosGenius = json_decode($responseGenius, true);
+                $hits = $dadosGenius['response']['hits'] ?? [];
 
-            if (!empty($hits)) {
-                $primeiroResultado = $hits[0]['result'];
-                $musicaEncontrada = [
-                    'titulo'  => $primeiroResultado['title'],
-                    'artista' => $primeiroResultado['primary_artist']['name'],
-                    'capa'    => $primeiroResultado['song_art_image_thumbnail_url'] ?? '',
-                ];
+                if (!empty($hits)) {
+                    $primeiroResultado = $hits[0]['result'];
+                    $musicaEncontrada = [
+                        'titulo'    => $primeiroResultado['title'],
+                        'artista'   => $primeiroResultado['primary_artist']['name'],
+                        'capa'      => $primeiroResultado['song_art_image_thumbnail_url'] ?? '',
+                        'genius_url'=> $primeiroResultado['url'] ?? '#'
+                    ];
 
-                // --- 2. TRADUZ NO HUGGING FACE ROUTER ---
-                if (empty($hfToken)) {
-                    $erroMsg = "Música encontrada, mas o Token do Hugging Face não foi configurado no .env.";
-                } else {
-                    function chamarHuggingFace($url, $payload, $token) {
-                        $ch = curl_init($url);
-                        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                        curl_setopt($ch, CURLOPT_POST, true);
-                        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-                        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-                        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-                        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-                        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-                        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                            "Authorization: Bearer " . trim($token),
-                            "Content-Type: application/json",
-                            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                        ]);
+                    // --- 2. TRADUZ NO HUGGING FACE ROUTER ---
+                    if (empty($hfToken)) {
+                        $erroMsg = "Música encontrada, mas o Token do Hugging Face não foi configurado no .env.";
+                    } else {
+                        // Tentativa 1: Modelo Principal
+                        $urlPrincipal = "https://router.huggingface.co/hf-inference/models/Musixmatch/opus-mt-en-romance";
+                        $payloadPrincipal = ["inputs" => ">>por<< " . $trechoDigitado];
+                        $resPrincipal = chamarHuggingFace($urlPrincipal, $payloadPrincipal, $hfToken);
 
-                        $response = curl_exec($ch);
-                        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                        curl_close($ch);
-
-                        return ['code' => $httpCode, 'response' => $response];
-                    }
-
-                    // TENTATIVA 1: Modelo Principal via Router API
-                    $urlPrincipal = "https://router.huggingface.co/hf-inference/models/Musixmatch/opus-mt-en-romance";
-                    $payloadPrincipal = ["inputs" => ">>por<< " . $trechoDigitado];
-                    $resPrincipal = chamarHuggingFace($urlPrincipal, $payloadPrincipal, $hfToken);
-
-                    if ($resPrincipal['code'] === 200) {
-                        $dadosHf = json_decode($resPrincipal['response'], true);
-                        if (is_array($dadosHf) && isset($dadosHf[0]['translation_text'])) {
-                            $traducaoResultado = $dadosHf[0]['translation_text'];
-                        }
-                    }
-
-                    // TENTATIVA 2: Fallback para Helsinki-NLP via Router API
-                    if (empty($traducaoResultado)) {
-                        $urlFallback = "https://router.huggingface.co/hf-inference/models/Helsinki-NLP/opus-mt-tc-big-en-pt";
-                        $payloadFallback = ["inputs" => $trechoDigitado];
-                        $resFallback = chamarHuggingFace($urlFallback, $payloadFallback, $hfToken);
-
-                        if ($resFallback['code'] === 200) {
-                            $dadosHf = json_decode($resFallback['response'], true);
+                        if ($resPrincipal['code'] === 200) {
+                            $dadosHf = json_decode($resPrincipal['response'], true);
                             if (is_array($dadosHf) && isset($dadosHf[0]['translation_text'])) {
                                 $traducaoResultado = $dadosHf[0]['translation_text'];
                             }
-                        } elseif ($resFallback['code'] === 503) {
-                            $erroMsg = "O modelo de IA está inicializando na nuvem. Aguarde alguns segundos e tente novamente.";
-                        } elseif ($resFallback['code'] === 401) {
-                            $erroMsg = "Token do Hugging Face inválido (HTTP 401). Verifique a chave no .env.";
-                        } else {
-                            $erroMsg = "Erro na requisição (HTTP " . $resFallback['code'] . "). Verifique sua chave do Hugging Face.";
+                        }
+
+                        // Tentativa 2: Fallback (Helsinki-NLP)
+                        if (empty($traducaoResultado)) {
+                            $urlFallback = "https://router.huggingface.co/hf-inference/models/Helsinki-NLP/opus-mt-tc-big-en-pt";
+                            $payloadFallback = ["inputs" => $trechoDigitado];
+                            $resFallback = chamarHuggingFace($urlFallback, $payloadFallback, $hfToken);
+
+                            if ($resFallback['code'] === 200) {
+                                $dadosHf = json_decode($resFallback['response'], true);
+                                if (is_array($dadosHf) && isset($dadosHf[0]['translation_text'])) {
+                                    $traducaoResultado = $dadosHf[0]['translation_text'];
+                                }
+                            } elseif ($resFallback['code'] === 503) {
+                                $erroMsg = "O modelo de IA está inicializando na nuvem. Aguarde alguns segundos e tente novamente.";
+                            } elseif ($resFallback['code'] === 401) {
+                                $erroMsg = "Token do Hugging Face inválido (HTTP 401). Verifique a chave no .env.";
+                            } else {
+                                $erroMsg = "Erro na requisição à IA (HTTP " . $resFallback['code'] . ").";
+                            }
                         }
                     }
+                } else {
+                    $erroMsg = "Nenhuma música foi encontrada para esse trecho.";
                 }
+            } elseif ($httpCodeGenius === 401) {
+                $erroMsg = "Erro de autenticação na API do Genius (HTTP 401). Verifique seu GENIUS_TOKEN.";
             } else {
-                $erroMsg = "Nenhuma música foi encontrada para esse trecho.";
+                $erroMsg = "Erro de conexão com a API do Genius (HTTP {$httpCodeGenius}).";
             }
-        } elseif ($httpCodeGenius === 401) {
-            $erroMsg = "Erro de autenticação na API do Genius (HTTP 401). Verifique seu GENIUS_TOKEN no .env.";
-        } else {
-            $erroMsg = "Erro de conexão com a API do Genius (HTTP {$httpCodeGenius}).";
         }
     }
 }
@@ -140,7 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LyricTranslator • Proz Educação</title>
+    <title>Spotiflame • Proz Educação</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -148,11 +157,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
         :root {
             --bg-color: #0B0E14;
             --card-bg: #151921;
-            --card-border: #232936;
-            --accent-purple: #7C3AED;
-            --accent-pink: #EC4899;
+            --card-border: #362323;
+            --accent-purple: #ec780a;
+            --accent-pink: #ff1e00;
             --text-primary: #F3F4F6;
-            --text-secondary: #9CA3AF;
+            --text-secondary: #af9c9c;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
@@ -181,9 +190,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
 
         .badge {
             display: inline-block;
-            background: linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(236, 72, 153, 0.2));
+            background: linear-gradient(135deg, rgb(255, 251, 0), rgb(255, 3, 3));
             border: 1px solid var(--accent-purple);
-            color: #C4B5FD;
+            color: #000000;
             font-size: 0.75rem;
             font-weight: 700;
             padding: 6px 14px;
@@ -196,16 +205,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
         .header h1 {
             font-size: 2.2rem;
             font-weight: 800;
-            background: linear-gradient(to right, #FFFFFF, #9CA3AF);
+            background: linear-gradient(to right, #FFFFFF, #af9c9c);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 8px;
         }
 
-        .header p { color: var(--text-secondary); font-size: 0.95rem; }
-
         .search-form { display: flex; flex-direction: column; gap: 15px; margin-bottom: 30px; }
-
         .input-group { display: flex; flex-direction: column; gap: 8px; }
 
         .input-group label {
@@ -230,7 +236,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
         .input-group input:focus {
             outline: none;
             border-color: var(--accent-purple);
-            box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.25);
+            box-shadow: 0 0 0 3px rgba(237, 58, 58, 0.25);
         }
 
         .btn-submit {
@@ -250,7 +256,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
         .error-card {
             background: rgba(239, 68, 68, 0.1);
             border: 1px solid #EF4444;
-            color: #FCA5A5;
+            color: #fd3d3d;
             padding: 15px 20px;
             border-radius: 12px;
             font-size: 0.95rem;
@@ -300,6 +306,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
         }
 
         .text-box p { font-size: 1.05rem; font-weight: 600; color: #F3F4F6; }
+
+        .lyrics-link-box {
+            background: rgba(236, 120, 10, 0.1);
+            border: 1px dashed var(--accent-purple);
+            padding: 16px;
+            border-radius: 12px;
+            text-align: center;
+            margin-top: 10px;
+        }
+
+        .lyrics-link-box p {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        .btn-external {
+            display: inline-block;
+            background: var(--accent-purple);
+            color: #FFF;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 700;
+            transition: background 0.2s ease;
+        }
+
+        .btn-external:hover { background: #dd0000; }
+
         .footer-note { text-align: center; margin-top: 25px; font-size: 0.8rem; color: var(--text-secondary); }
     </style>
 </head>
@@ -308,8 +344,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
 <div class="container">
     <div class="header">
         <span class="badge">Sistemas Inteligentes • Proz</span>
-        <h1>LyricTranslator IA</h1>
-        <p>Identifique a música no Genius e traduza o trecho com Hugging Face</p>
+        <h1>Spotiflame</h1>
     </div>
 
     <form method="POST" class="search-form">
@@ -317,7 +352,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
             <label for="trecho">Trecho da Letra (em Inglês)</label>
             <input type="text" id="trecho" name="trecho" required placeholder="Ex: i found a love for me" value="<?php echo htmlspecialchars($trechoDigitado); ?>">
         </div>
-        <button type="submit" class="btn-submit">Buscar & Traduzir via IA</button>
+        <button type="submit" class="btn-submit">Buscar</button>
     </form>
 
     <?php if ($erroMsg): ?>
@@ -334,7 +369,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
                 <?php endif; ?>
                 <div class="song-details">
                     <h2><?php echo htmlspecialchars($musicaEncontrada['titulo']); ?></h2>
-                    <p>👤 <?php echo htmlspecialchars($musicaEncontrada['artista']); ?></p>
+                    <p><?php echo htmlspecialchars($musicaEncontrada['artista']); ?></p>
                 </div>
             </div>
 
@@ -347,6 +382,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
                     <span>Tradução Automática (Português - IA)</span>
                     <p>"<?php echo htmlspecialchars($traducaoResultado); ?>"</p>
                 </div>
+            </div>
+
+            <div class="lyrics-link-box">
+                <p>Para ver a letra completa e oficial desta música de forma legal, acesse a página da obra no Genius:</p>
+                <a href="<?php echo htmlspecialchars($musicaEncontrada['genius_url']); ?>" target="_blank" rel="noopener noreferrer" class="btn-external">
+                    Ver Letra Completa no Genius ↗
+                </a>
             </div>
         </div>
     <?php endif; ?>
