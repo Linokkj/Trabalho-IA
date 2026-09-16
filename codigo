@@ -1,0 +1,360 @@
+<?php
+/**
+ * PROZ EDUCAÇÃO / SISTEMAS INTELIGENTES
+ * Projeto: Buscador de Músicas & Tradutor de Letras via IA
+ * API Externa: Genius API
+ * Servidor IA: Hugging Face Router API (Serverless Nuvem)
+ */
+
+// --- CARREGADOR MANUAL DO ARQUIVO .ENV ---
+if (file_exists(__DIR__ . '/.env')) {
+    $envLines = file(__DIR__ . '/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($envLines as $line) {
+        $line = trim($line);
+        if (strpos($line, '#') === 0 || empty($line)) continue;
+        if (strpos($line, '=') !== false) {
+            list($name, $value) = explode('=', $line, 2);
+            $name = trim($name);
+            $value = trim($value, " \t\n\r\0\x0B\"'");
+            putenv("{$name}={$value}");
+            $_ENV[$name] = $value;
+        }
+    }
+}
+
+$geniusToken = getenv('GENIUS_TOKEN') ?: ($_ENV['GENIUS_TOKEN'] ?? '');
+$hfToken     = getenv('HF_TOKEN')     ?: ($_ENV['HF_TOKEN'] ?? '');
+
+$trechoDigitado    = '';
+$musicaEncontrada  = null;
+$traducaoResultado = null;
+$erroMsg           = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['trecho'])) {
+    $trechoDigitado = trim($_POST['trecho']);
+
+    if (empty($geniusToken)) {
+        $erroMsg = "Token do Genius não configurado no .env.";
+    } else {
+        // --- 1. BUSCA MÚSICA NO GENIUS ---
+        $geniusUrl = "https://api.genius.com/search?q=" . urlencode($trechoDigitado);
+        $chGenius = curl_init($geniusUrl);
+        curl_setopt($chGenius, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($chGenius, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($chGenius, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($chGenius, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+        curl_setopt($chGenius, CURLOPT_TIMEOUT, 30);
+        curl_setopt($chGenius, CURLOPT_HTTPHEADER, [
+            "Authorization: Bearer " . trim($geniusToken),
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        ]);
+
+        $responseGenius = curl_exec($chGenius);
+        $httpCodeGenius = curl_getinfo($chGenius, CURLINFO_HTTP_CODE);
+        curl_close($chGenius);
+
+        if ($httpCodeGenius === 200) {
+            $dadosGenius = json_decode($responseGenius, true);
+            $hits = $dadosGenius['response']['hits'] ?? [];
+
+            if (!empty($hits)) {
+                $primeiroResultado = $hits[0]['result'];
+                $musicaEncontrada = [
+                    'titulo'  => $primeiroResultado['title'],
+                    'artista' => $primeiroResultado['primary_artist']['name'],
+                    'capa'    => $primeiroResultado['song_art_image_thumbnail_url'] ?? '',
+                ];
+
+                // --- 2. TRADUZ NO HUGGING FACE ROUTER ---
+                if (empty($hfToken)) {
+                    $erroMsg = "Música encontrada, mas o Token do Hugging Face não foi configurado no .env.";
+                } else {
+                    function chamarHuggingFace($url, $payload, $token) {
+                        $ch = curl_init($url);
+                        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                        curl_setopt($ch, CURLOPT_POST, true);
+                        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+                        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+                        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+                        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+                        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                            "Authorization: Bearer " . trim($token),
+                            "Content-Type: application/json",
+                            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                        ]);
+
+                        $response = curl_exec($ch);
+                        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                        curl_close($ch);
+
+                        return ['code' => $httpCode, 'response' => $response];
+                    }
+
+                    // TENTATIVA 1: Modelo Principal via Router API
+                    $urlPrincipal = "https://router.huggingface.co/hf-inference/models/Musixmatch/opus-mt-en-romance";
+                    $payloadPrincipal = ["inputs" => ">>por<< " . $trechoDigitado];
+                    $resPrincipal = chamarHuggingFace($urlPrincipal, $payloadPrincipal, $hfToken);
+
+                    if ($resPrincipal['code'] === 200) {
+                        $dadosHf = json_decode($resPrincipal['response'], true);
+                        if (is_array($dadosHf) && isset($dadosHf[0]['translation_text'])) {
+                            $traducaoResultado = $dadosHf[0]['translation_text'];
+                        }
+                    }
+
+                    // TENTATIVA 2: Fallback para Helsinki-NLP via Router API
+                    if (empty($traducaoResultado)) {
+                        $urlFallback = "https://router.huggingface.co/hf-inference/models/Helsinki-NLP/opus-mt-tc-big-en-pt";
+                        $payloadFallback = ["inputs" => $trechoDigitado];
+                        $resFallback = chamarHuggingFace($urlFallback, $payloadFallback, $hfToken);
+
+                        if ($resFallback['code'] === 200) {
+                            $dadosHf = json_decode($resFallback['response'], true);
+                            if (is_array($dadosHf) && isset($dadosHf[0]['translation_text'])) {
+                                $traducaoResultado = $dadosHf[0]['translation_text'];
+                            }
+                        } elseif ($resFallback['code'] === 503) {
+                            $erroMsg = "O modelo de IA está inicializando na nuvem. Aguarde alguns segundos e tente novamente.";
+                        } elseif ($resFallback['code'] === 401) {
+                            $erroMsg = "Token do Hugging Face inválido (HTTP 401). Verifique a chave no .env.";
+                        } else {
+                            $erroMsg = "Erro na requisição (HTTP " . $resFallback['code'] . "). Verifique sua chave do Hugging Face.";
+                        }
+                    }
+                }
+            } else {
+                $erroMsg = "Nenhuma música foi encontrada para esse trecho.";
+            }
+        } elseif ($httpCodeGenius === 401) {
+            $erroMsg = "Erro de autenticação na API do Genius (HTTP 401). Verifique seu GENIUS_TOKEN no .env.";
+        } else {
+            $erroMsg = "Erro de conexão com a API do Genius (HTTP {$httpCodeGenius}).";
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LyricTranslator • Proz Educação</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0B0E14;
+            --card-bg: #151921;
+            --card-border: #232936;
+            --accent-purple: #7C3AED;
+            --accent-pink: #EC4899;
+            --text-primary: #F3F4F6;
+            --text-secondary: #9CA3AF;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 650px;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            padding: 35px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+        }
+
+        .header { text-align: center; margin-bottom: 30px; }
+
+        .badge {
+            display: inline-block;
+            background: linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(236, 72, 153, 0.2));
+            border: 1px solid var(--accent-purple);
+            color: #C4B5FD;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 6px 14px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+
+        .header h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #FFFFFF, #9CA3AF);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+
+        .header p { color: var(--text-secondary); font-size: 0.95rem; }
+
+        .search-form { display: flex; flex-direction: column; gap: 15px; margin-bottom: 30px; }
+
+        .input-group { display: flex; flex-direction: column; gap: 8px; }
+
+        .input-group label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .input-group input {
+            width: 100%;
+            background: #0B0E14;
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 16px;
+            color: #FFF;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: var(--accent-purple);
+            box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.25);
+        }
+
+        .btn-submit {
+            background: linear-gradient(135deg, var(--accent-purple), var(--accent-pink));
+            color: white;
+            border: none;
+            border-radius: 12px;
+            padding: 16px;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.2s ease, opacity 0.2s ease;
+        }
+
+        .btn-submit:hover { opacity: 0.95; transform: translateY(-2px); }
+
+        .error-card {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid #EF4444;
+            color: #FCA5A5;
+            padding: 15px 20px;
+            border-radius: 12px;
+            font-size: 0.95rem;
+            margin-bottom: 25px;
+        }
+
+        .result-card {
+            background: #0B0E14;
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .song-info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 20px;
+        }
+
+        .song-info img { width: 70px; height: 70px; border-radius: 10px; object-fit: cover; }
+        .song-details h2 { font-size: 1.3rem; font-weight: 700; color: #FFF; }
+        .song-details p { font-size: 0.95rem; color: var(--text-secondary); }
+
+        .translation-block { display: flex; flex-direction: column; gap: 12px; }
+
+        .text-box {
+            background: #151921;
+            padding: 14px 18px;
+            border-radius: 10px;
+            border-left: 4px solid var(--accent-purple);
+        }
+
+        .text-box.translation { border-left-color: var(--accent-pink); }
+
+        .text-box span {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .text-box p { font-size: 1.05rem; font-weight: 600; color: #F3F4F6; }
+        .footer-note { text-align: center; margin-top: 25px; font-size: 0.8rem; color: var(--text-secondary); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <span class="badge">Sistemas Inteligentes • Proz</span>
+        <h1>LyricTranslator IA</h1>
+        <p>Identifique a música no Genius e traduza o trecho com Hugging Face</p>
+    </div>
+
+    <form method="POST" class="search-form">
+        <div class="input-group">
+            <label for="trecho">Trecho da Letra (em Inglês)</label>
+            <input type="text" id="trecho" name="trecho" required placeholder="Ex: i found a love for me" value="<?php echo htmlspecialchars($trechoDigitado); ?>">
+        </div>
+        <button type="submit" class="btn-submit">Buscar & Traduzir via IA</button>
+    </form>
+
+    <?php if ($erroMsg): ?>
+        <div class="error-card">
+            ⚠️ <?php echo htmlspecialchars($erroMsg); ?>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($musicaEncontrada && $traducaoResultado): ?>
+        <div class="result-card">
+            <div class="song-info">
+                <?php if ($musicaEncontrada['capa']): ?>
+                    <img src="<?php echo htmlspecialchars($musicaEncontrada['capa']); ?>" alt="Capa">
+                <?php endif; ?>
+                <div class="song-details">
+                    <h2><?php echo htmlspecialchars($musicaEncontrada['titulo']); ?></h2>
+                    <p>👤 <?php echo htmlspecialchars($musicaEncontrada['artista']); ?></p>
+                </div>
+            </div>
+
+            <div class="translation-block">
+                <div class="text-box">
+                    <span>Trecho Pesquisado (Inglês)</span>
+                    <p>"<?php echo htmlspecialchars($trechoDigitado); ?>"</p>
+                </div>
+                <div class="text-box translation">
+                    <span>Tradução Automática (Português - IA)</span>
+                    <p>"<?php echo htmlspecialchars($traducaoResultado); ?>"</p>
+                </div>
+            </div>
+        </div>
+    <?php endif; ?>
+
+    <div class="footer-note">
+        Modelo Hugging Face: <code>Musixmatch/opus-mt-en-romance</code>
+    </div>
+</div>
+
+</body>
+</html>
