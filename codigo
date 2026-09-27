@@ -1,12 +1,7 @@
 <?php
-/**
- * PROZ EDUCAÇÃO / SISTEMAS INTELIGENTES
- * Projeto: Buscador de Músicas & Tradutor de Letras via IA
- * API Externa: Genius API
- * Servidor IA: Hugging Face Router API (Serverless Nuvem)
- */
 
-// --- CARREGADOR MANUAL DO ARQUIVO .ENV ---
+
+
 if (file_exists(__DIR__ . '/.env')) {
     $envLines = file(__DIR__ . '/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($envLines as $line) {
@@ -22,7 +17,6 @@ if (file_exists(__DIR__ . '/.env')) {
     }
 }
 
-// --- FUNÇÃO DE REQUISIÇÃO HUGGING FACE ---
 function chamarHuggingFace(string $url, array $payload, string $token): array {
     $ch = curl_init($url);
     curl_setopt_array($ch, [
@@ -41,11 +35,11 @@ function chamarHuggingFace(string $url, array $payload, string $token): array {
         ]
     ]);
 
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+    $response = curl_exec($ch); //chama http para servidor hugging face
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);//lista de resposta, erros e acerto
+    curl_close($ch); //finalizar
 
-    return ['code' => $httpCode, 'response' => $response];
+    return ['code' => $httpCode, 'response' => $response];// conectar as array para retornar codigo bruto de json 
 }
 
 $geniusToken = getenv('GENIUS_TOKEN') ?: ($_ENV['GENIUS_TOKEN'] ?? '');
@@ -64,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (empty($geniusToken)) {
             $erroMsg = "Token do Genius não configurado no arquivo .env.";
         } else {
-            // --- 1. BUSCA MÚSICA NO GENIUS ---
+        
             $geniusUrl = "https://api.genius.com/search?q=" . urlencode($trechoDigitado);
             $chGenius = curl_init($geniusUrl);
             curl_setopt_array($chGenius, [
@@ -87,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $dadosGenius = json_decode($responseGenius, true);
                 $hits = $dadosGenius['response']['hits'] ?? [];
 
-                if (!empty($hits)) {
+                if (!empty($hits)) { //busca resultado na api se nao tiver ele quebra o codigo e mostra mensagem de erro
                     $primeiroResultado = $hits[0]['result'];
                     $musicaEncontrada = [
                         'titulo'    => $primeiroResultado['title'],
@@ -96,27 +90,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'genius_url'=> $primeiroResultado['url'] ?? '#'
                     ];
 
-                    // --- 2. TRADUZ NO HUGGING FACE ROUTER ---
                     if (empty($hfToken)) {
                         $erroMsg = "Música encontrada, mas o Token do Hugging Face não foi configurado no .env.";
                     } else {
-                        // Tentativa 1: Modelo Principal
-                        $urlPrincipal = "https://router.huggingface.co/hf-inference/models/Musixmatch/opus-mt-en-romance";
-                        $payloadPrincipal = ["inputs" => ">>por<< " . $trechoDigitado];
-                        $resPrincipal = chamarHuggingFace($urlPrincipal, $payloadPrincipal, $hfToken);
+                     
+                        $urlPrincipal = "https://router.huggingface.co/hf-inference/models/Musixmatch/opus-mt-en-romance";//url do modelo de tradução do hugging face
+                        $payloadPrincipal = ["inputs" => ">>por<< " . $trechoDigitado];//payload para enviar para o modelo de tradução, indicando que queremos traduzir para português
+                        $resPrincipal = chamarHuggingFace($urlPrincipal, $payloadPrincipal, $hfToken);//chama a função para enviar a requisição para o modelo de tradução
 
-                        if ($resPrincipal['code'] === 200) {
+                        if ($resPrincipal['code'] === 200) { //se passar ele salva em traducao
                             $dadosHf = json_decode($resPrincipal['response'], true);
                             if (is_array($dadosHf) && isset($dadosHf[0]['translation_text'])) {
                                 $traducaoResultado = $dadosHf[0]['translation_text'];
                             }
                         }
 
-                        // Tentativa 2: Fallback (Helsinki-NLP)
                         if (empty($traducaoResultado)) {
-                            $urlFallback = "https://router.huggingface.co/hf-inference/models/Helsinki-NLP/opus-mt-tc-big-en-pt";
-                            $payloadFallback = ["inputs" => $trechoDigitado];
-                            $resFallback = chamarHuggingFace($urlFallback, $payloadFallback, $hfToken);
+                            $urlFallback = "https://router.huggingface.co/hf-inference/models/Helsinki-NLP/opus-mt-tc-big-en-pt";//url do modelo de fallback
+                            $payloadFallback = ["inputs" => $trechoDigitado];//payload para enviar para o modelo de fallback, sem indicar o idioma de destino
+                            $resFallback = chamarHuggingFace($urlFallback, $payloadFallback, $hfToken);//chama a função para enviar a requisição para o modelo de fallback
 
                             if ($resFallback['code'] === 200) {
                                 $dadosHf = json_decode($resFallback['response'], true);
@@ -343,7 +335,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <div class="container">
     <div class="header">
-        <span class="badge">Sistemas Inteligentes • Proz</span>
         <h1>Spotiflame</h1>
     </div>
 
@@ -357,7 +348,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <?php if ($erroMsg): ?>
         <div class="error-card">
-            ⚠️ <?php echo htmlspecialchars($erroMsg); ?>
+            <?php echo htmlspecialchars($erroMsg); ?>
         </div>
     <?php endif; ?>
 
