@@ -1,7 +1,0 @@
-curl https://router.huggingface.co/hf-inference/models/Helsinki-NLP/opus-mt-en-ROMANCE \
-    -X POST \
-    -H "Authorization: Bearer $HF_TOKEN" \
-    -H 'Content-Type: application/json' \
-    -d '{
-        "inputs": "\"Меня зовут Вольфганг и я живу в Берлине\""
-    }'
