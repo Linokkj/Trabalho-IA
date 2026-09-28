@@ -20,7 +20,7 @@ if (file_exists(__DIR__ . '/.env')) {
 function chamarHuggingFace(string $url, array $payload, string $token): array {
     $ch = curl_init($url);
     curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_RETURNTRANSFER => true,//pegar resposta e mostra na tela
         CURLOPT_POST           => true,
         CURLOPT_POSTFIELDS     => json_encode($payload),
         CURLOPT_SSL_VERIFYPEER => false,
